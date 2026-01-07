@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>連點消除 - 無限關卡</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background-color: #0f172a;
+            touch-action: none;
+            overflow: hidden;
+            user-select: none;
+            -webkit-user-select: none;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        .game-container {
+            max-width: 500px;
+            margin: auto;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            padding: 20px;
+        }
+        #canvas-container {
+            position: relative;
+            flex-grow: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        canvas {
+            background: #1e293b;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+            max-width: 100%;
+            max-height: 100%;
+        }
+        .dot {
+            filter: drop-shadow(0 0 8px currentColor);
+        }
+        .ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: none;
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(4px);
+            z-index: 50;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border-radius: 12px;
+        }
+        .glow-text {
+            text-shadow: 0 0 10px rgba(255,255,255,0.5);
+        }
+    </style>
+</head>
+<body>
+
+<div class="game-container">
+    <div class="flex justify-between items-center mb-4 text-white">
+        <div>
+            <h1 class="text-2xl font-bold glow-text">連點消除</h1>
+            <p class="text-slate-400 text-sm">關卡: <span id="level-display">1</span></p>
+        </div>
+        <div class="text-right">
+            <button id="reset-btn" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm transition">重置本關</button>
+        </div>
+    </div>
+
+    <div id="canvas-container">
+        <canvas id="gameCanvas"></canvas>
+        
+        <div id="win-overlay" class="ui-overlay">
+            <h2 class="text-4xl font-black text-white mb-6">太棒了！</h2>
+            <p class="text-slate-300 mb-8 text-center px-6">你已成功填滿所有區域並完成連線。</p>
+            <button id="next-btn" class="bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 px-10 rounded-full text-xl shadow-lg shadow-indigo-500/30 transition transform hover:scale-105">
+                下一關
+            </button>
+        </div>
+    </div>
+
+    <div class="mt-6 text-slate-400 text-center text-xs">
+        連接相同顏色的點點，並填滿所有格子以過關。
+    </div>
+</div>
+
+<script>
+    /** 遊戲設定與狀態 **/
+    const COLORS = [
+        '#FF5252', '#4CAF50', '#2196F3', '#FFEB3B', 
+        '#E91E63', '#9C27B0', '#00BCD4', '#FF9800', 
+        '#795548', '#607D8B', '#FFFFFF', '#4DB6AC'
+    ];
+
+    let state = {
+        level: 1,
+        gridSize: 5,
+        dots: [],      // {r, c, color, colorIdx}
+        paths: {},     // colorIdx -> [{r, c}]
+        currentDrawing: null, // colorIdx
+        isComplete: false,
+        cells: []      // 二維數組，記錄佔用情況 [r][c] = colorIdx
+    };
+
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const winOverlay = document.getElementById('win-overlay');
+    const levelDisplay = document.getElementById('level-display');
+
+    /** 初始化關卡 **/
+    function initLevel() {
+        // 根據關卡調整難度
+        state.gridSize = Math.min(10, 5 + Math.floor((state.level - 1) / 5));
+        const colorCount = Math.min(COLORS.length, 3 + Math.floor((state.level - 1) / 3));
+        
+        generatePuzzle(state.gridSize, colorCount);
+        
+        state.paths = {};
+        state.isComplete = false;
+        state.currentDrawing = null;
+        winOverlay.style.display = 'none';
+        levelDisplay.innerText = state.level;
+        
+        resizeCanvas();
+        draw();
+    }
+
+    /** 核心演算法：保證有解的謎題生成器 **/
+    function generatePuzzle(size, colorCount) {
+        // 1. 初始化空地圖
+        let grid = Array(size).fill().map(() => Array(size).fill(-1));
+        let paths = [];
+        
+        // 2. 隨機填滿路徑 (Random Walk Fill)
+        // 這裡使用簡化的路徑分割法
+        let availableCells = [];
+        for(let r=0; r<size; r++) for(let c=0; c<size; c++) availableCells.push({r, c});
+        
+        let attempts = 0;
+        let successfulPaths = 0;
+
+        while(availableCells.length > 0 && successfulPaths < colorCount && attempts < 100) {
+            attempts++;
+            let start = availableCells[Math.floor(Math.random() * availableCells.length)];
+            let currentPath = [start];
+            grid[start.r][start.c] = successfulPaths;
+            
+            let growing = true;
+            while(growing) {
+                let last = currentPath[currentPath.length - 1];
+                let neighbors = [
+                    {r: last.r-1, c: last.c}, {r: last.r+1, c: last.c},
+                    {r: last.r, c: last.c-1}, {r: last.r, c: last.c+1}
+                ].filter(n => 
+                    n.r >= 0 && n.r < size && n.c >= 0 && n.c < size && 
+                    grid[n.r][n.c] === -1
+                );
+                
+                if(neighbors.length > 0) {
+                    let next = neighbors[Math.floor(Math.random() * neighbors.length)];
+                    grid[next.r][next.c] = successfulPaths;
+                    currentPath.push(next);
+                } else {
+                    growing = false;
+                }
+            }
+            
+            if(currentPath.length >= 2) {
+                paths.push(currentPath);
+                successfulPaths++;
+                availableCells = availableCells.filter(c => grid[c.r][c.c] === -1);
+            } else {
+                // 復原
+                currentPath.forEach(p => grid[p.r][p.c] = -1);
+            }
+        }
+
+        // 3. 提取端點
+        state.dots = [];
+        paths.forEach((path, idx) => {
+            let start = path[0];
+            let end = path[path.length - 1];
+            state.dots.push({r: start.r, c: start.c, colorIdx: idx, color: COLORS[idx]});
+            state.dots.push({r: end.r, c: end.c, colorIdx: idx, color: COLORS[idx]});
+        });
+
+        // 4. 清除邏輯格子狀態
+        resetInternalGrid();
+    }
+
+    function resetInternalGrid() {
+        state.cells = Array(state.gridSize).fill().map(() => Array(state.gridSize).fill(-1));
+        // 預填端點
+        state.dots.forEach(d => {
+            state.cells[d.r][d.c] = d.colorIdx;
+        });
+    }
+
+    /** 繪圖與互動 **/
+    function resizeCanvas() {
+        const container = document.getElementById('canvas-container');
+        const size = Math.min(container.clientWidth, container.clientHeight);
+        canvas.width = size;
+        canvas.height = size;
+        draw();
+    }
+
+    function getCellSize() {
+        return canvas.width / state.gridSize;
+    }
+
+    function draw() {
+        const cellSize = getCellSize();
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // 畫網格線
+        ctx.strokeStyle = '#334155';
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= state.gridSize; i++) {
+            ctx.beginPath();
+            ctx.moveTo(i * cellSize, 0);
+            ctx.lineTo(i * cellSize, canvas.height);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(0, i * cellSize);
+            ctx.lineTo(canvas.width, i * cellSize);
+            ctx.stroke();
+        }
+
+        // 畫已完成的線條
+        Object.keys(state.paths).forEach(colorIdx => {
+            const path = state.paths[colorIdx];
+            if (path.length < 2) return;
+
+            ctx.strokeStyle = COLORS[colorIdx];
+            ctx.lineWidth = cellSize * 0.35;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            
+            // 外發光效果
+            ctx.shadowBlur = 15;
+            ctx.shadowColor = COLORS[colorIdx];
+
+            ctx.beginPath();
+            ctx.moveTo(path[0].c * cellSize + cellSize/2, path[0].r * cellSize + cellSize/2);
+            for (let i = 1; i < path.length; i++) {
+                ctx.lineTo(path[i].c * cellSize + cellSize/2, path[i].r * cellSize + cellSize/2);
+            }
+            ctx.stroke();
+            
+            ctx.shadowBlur = 0; // 重置發光免得影響其他
+        });
+
+        // 畫點點
+        state.dots.forEach(dot => {
+            ctx.fillStyle = dot.color;
+            ctx.beginPath();
+            ctx.arc(dot.c * cellSize + cellSize/2, dot.r * cellSize + cellSize/2, cellSize * 0.3, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // 端點中心加白圈
+            ctx.fillStyle = 'rgba(255,255,255,0.3)';
+            ctx.beginPath();
+            ctx.arc(dot.c * cellSize + cellSize/2, dot.r * cellSize + cellSize/2, cellSize * 0.1, 0, Math.PI * 2);
+            ctx.fill();
+        });
+    }
+
+    /** 輸入處理 **/
+    function getCellFromEvent(e) {
+        const rect = canvas.getBoundingClientRect();
+        const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        const x = clientX - rect.left;
+        const y = clientY - rect.top;
+        const c = Math.floor(x / getCellSize());
+        const r = Math.floor(y / getCellSize());
+        if (r >= 0 && r < state.gridSize && c >= 0 && c < state.gridSize) {
+            return {r, c};
+        }
+        return null;
+    }
+
+    function startDraw(e) {
+        if (state.isComplete) return;
+        const cell = getCellFromEvent(e);
+        if (!cell) return;
+
+        // 檢查是否點在端點上
+        const dot = state.dots.find(d => d.r === cell.r && d.c === cell.c);
+        
+        if (dot) {
+            // 開始新連線，先清除該顏色的舊連線
+            state.currentDrawing = dot.colorIdx;
+            state.paths[dot.colorIdx] = [{r: cell.r, c: cell.c}];
+            updateGridOccupation();
+        } else {
+            // 檢查是否點在現有連線上，如果是，從這裡開始重新畫
+            for (let colorIdx in state.paths) {
+                const path = state.paths[colorIdx];
+                const index = path.findIndex(p => p.r === cell.r && p.c === cell.c);
+                if (index !== -1) {
+                    state.currentDrawing = parseInt(colorIdx);
+                    state.paths[colorIdx] = path.slice(0, index + 1);
+                    updateGridOccupation();
+                    break;
+                }
+            }
+        }
+        draw();
+    }
+
+    function moveDraw(e) {
+        if (state.currentDrawing === null) return;
+        const cell = getCellFromEvent(e);
+        if (!cell) return;
+
+        const path = state.paths[state.currentDrawing];
+        const last = path[path.length - 1];
+
+        // 必須是相鄰格
+        if (Math.abs(cell.r - last.r) + Math.abs(cell.c - last.c) !== 1) return;
+
+        // 如果連回前一格，視為回溯
+        if (path.length > 1 && cell.r === path[path.length-2].r && cell.c === path[path.length-2].c) {
+            path.pop();
+            updateGridOccupation();
+            draw();
+            return;
+        }
+
+        // 檢查是否撞到其他顏色連線，如果撞到，斷開對方的連線
+        const otherColor = state.cells[cell.r][cell.c];
+        if (otherColor !== -1 && otherColor !== state.currentDrawing) {
+            delete state.paths[otherColor];
+        }
+
+        // 檢查是否撞到自己的端點（除了目標端點以外）
+        const dot = state.dots.find(d => d.r === cell.r && d.c === cell.c);
+        if (dot && dot.colorIdx !== state.currentDrawing) {
+            return; // 不能穿過別人的家
+        }
+
+        // 檢查是否已經在這個路徑中了（自己撞自己，回溯或切斷）
+        const selfIdx = path.findIndex(p => p.r === cell.r && p.c === cell.c);
+        if (selfIdx !== -1) {
+            state.paths[state.currentDrawing] = path.slice(0, selfIdx + 1);
+        } else {
+            // 正常延伸
+            path.push(cell);
+            
+            // 如果走到了目標端點，繪製結束
+            if (dot && dot.colorIdx === state.currentDrawing) {
+                state.currentDrawing = null;
+                checkWin();
+            }
+        }
+
+        updateGridOccupation();
+        draw();
+    }
+
+    function endDraw() {
+        state.currentDrawing = null;
+        checkWin();
+        draw();
+    }
+
+    function updateGridOccupation() {
+        resetInternalGrid();
+        Object.keys(state.paths).forEach(colorIdx => {
+            state.paths[colorIdx].forEach(p => {
+                state.cells[p.r][p.c] = parseInt(colorIdx);
+            });
+        });
+    }
+
+    function checkWin() {
+        // 條件 1: 所有顏色都連上了 (每個顏色路徑頭尾必須都是端點)
+        const activeColors = [...new Set(state.dots.map(d => d.colorIdx))];
+        const allConnected = activeColors.every(idx => {
+            const path = state.paths[idx];
+            if (!path || path.length < 2) return false;
+            const start = path[0];
+            const end = path[path.length-1];
+            // 檢查頭尾是否都是該顏色的端點
+            const startIsDot = state.dots.some(d => d.colorIdx === idx && d.r === start.r && d.c === start.c);
+            const endIsDot = state.dots.some(d => d.colorIdx === idx && d.r === end.r && d.c === end.c);
+            return startIsDot && endIsDot && (start.r !== end.r || start.c !== end.c);
+        });
+
+        if (!allConnected) return;
+
+        // 條件 2: 網格全滿
+        let full = true;
+        for(let r=0; r<state.gridSize; r++) {
+            for(let c=0; c<state.gridSize; c++) {
+                if(state.cells[r][c] === -1) {
+                    full = false;
+                    break;
+                }
+            }
+        }
+
+        if (allConnected && full) {
+            state.isComplete = true;
+            winOverlay.style.display = 'flex';
+        }
+    }
+
+    /** 監聽事件 **/
+    canvas.addEventListener('mousedown', startDraw);
+    window.addEventListener('mousemove', moveDraw);
+    window.addEventListener('mouseup', endDraw);
+
+    canvas.addEventListener('touchstart', (e) => { e.preventDefault(); startDraw(e); }, {passive: false});
+    window.addEventListener('touchmove', (e) => { e.preventDefault(); moveDraw(e); }, {passive: false});
+    window.addEventListener('touchend', endDraw);
+
+    document.getElementById('reset-btn').addEventListener('click', () => {
+        state.paths = {};
+        resetInternalGrid();
+        draw();
+    });
+
+    document.getElementById('next-btn').addEventListener('click', () => {
+        state.level++;
+        initLevel();
+    });
+
+    window.addEventListener('resize', resizeCanvas);
+
+    // 啟動第一關
+    window.onload = initLevel;
+
+</script>
+
+</body>
+</html>
